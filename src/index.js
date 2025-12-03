@@ -9,7 +9,12 @@ import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
 
-import { connectDB, closeDB, isConnected, mongoHealthMiddleware } from "./lib/db.js"; // resilient db module (retries)
+import {
+  connectDB,
+  closeDB,
+  isConnected,
+  mongoHealthMiddleware,
+} from "./lib/db.js"; // resilient db module (retries)
 import authRoutes from "./routes/auth.route.js";
 import messageRoutes from "./routes/message.route.js";
 // IMPORTANT: lib/socket.js must export `app`, `server`, `io`, and createGracefulExit()
@@ -21,29 +26,40 @@ import { app, server, io, createGracefulExit } from "./lib/socket.js";
  */
 if (process.env.NODE_ENV !== "production") {
   try {
-    import("fs").then(({ appendFile }) => {
-      const safeAppend = (text) => {
-        try { appendFile("./dev-unhandled.log", text + "\n"); } catch (e) { /* ignore */ }
-      };
-
-      process.on("unhandledRejection", (reason, promise) => {
-        const dump = {
-          ts: new Date().toISOString(),
-          type: "unhandledRejection",
-          reason: typeof reason === "object" && reason ? (reason.stack || reason.message) : String(reason),
+    import("fs")
+      .then(({ appendFile }) => {
+        const safeAppend = (text) => {
+          try {
+            appendFile("./dev-unhandled.log", text + "\n");
+          } catch (e) {
+            /* ignore */
+          }
         };
-        safeAppend(JSON.stringify(dump));
-      });
 
-      process.on("uncaughtException", (err) => {
-        const dump = {
-          ts: new Date().toISOString(),
-          type: "uncaughtException",
-          error: (err && err.stack) || String(err),
-        };
-        safeAppend(JSON.stringify(dump));
+        process.on("unhandledRejection", (reason, promise) => {
+          const dump = {
+            ts: new Date().toISOString(),
+            type: "unhandledRejection",
+            reason:
+              typeof reason === "object" && reason
+                ? reason.stack || reason.message
+                : String(reason),
+          };
+          safeAppend(JSON.stringify(dump));
+        });
+
+        process.on("uncaughtException", (err) => {
+          const dump = {
+            ts: new Date().toISOString(),
+            type: "uncaughtException",
+            error: (err && err.stack) || String(err),
+          };
+          safeAppend(JSON.stringify(dump));
+        });
+      })
+      .catch(() => {
+        /* ignore import errors */
       });
-    }).catch(() => { /* ignore import errors */ });
   } catch (e) {
     /* ignore safety wrapper errors */
   }
@@ -52,25 +68,32 @@ if (process.env.NODE_ENV !== "production") {
 const PORT = process.env.PORT || 5000;
 const __dirname = path.resolve();
 
-// FRONTEND_ORIGINS env can be a comma-separated list: "http://localhost:5173,https://app.example.com"
-const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "http://localhost:5173")
-  .split(",")
-  .map((s) => s.trim());
-
 // Express app safety settings
-app.set("trust proxy", process.env.TRUST_PROXY === "true" || process.env.NODE_ENV === "production");
+// We're behind a single proxy (Render), so trust the first hop only
+app.set("trust proxy", 1);
 
-// CORS configuration for express (uses same origins list used by socket.js)
+// ---- CORS CONFIG ----
+const allowedOrigins = [
+  "http://localhost:5173", // Vite dev
+  "https://chintu-chat.netlify.app", // Netlify prod
+];
+
 const corsOptions = {
   origin: (origin, cb) => {
-    // allow requests with no origin (like mobile apps or curl)
+    // allow requests with no origin (curl, mobile apps, etc.)
     if (!origin) return cb(null, true);
-    if (FRONTEND_ORIGINS.indexOf(origin) !== -1) {
+
+    if (allowedOrigins.includes(origin)) {
       return cb(null, true);
     }
-    cb(new Error("CORS policy: Origin not allowed"));
+
+    console.warn("[cors] blocked origin:", origin);
+    // deny CORS for disallowed origins without throwing
+    return cb(null, false);
   },
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
   optionsSuccessStatus: 200,
 };
 
@@ -82,12 +105,13 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Middlewares
+// -------- MIDDLEWARES --------
 app.use(helmet());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(cookieParser());
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // handle CORS preflight globally
 app.use("/api/", apiLimiter); // apply rate limiter to API routes
 
 // Healthcheck (useful for probes)
@@ -105,7 +129,7 @@ if (typeof mongoHealthMiddleware === "function") {
   app.use("/mongo-health", mongoHealthMiddleware());
 }
 
-// Routes
+// -------- ROUTES --------
 app.use("/api/auth", authRoutes);
 app.use("/api/messages", messageRoutes);
 
@@ -125,12 +149,14 @@ app.use((req, res) => {
 });
 
 // ----------------- Defensive server listening bookkeeping -----------------
-// Some server implementations/adapters might not reliably expose `server.listening`
-// at all times. Track when we actually started listening so closeHttpServer can decide.
 if (server && typeof server.on === "function") {
   // set a small internal flag when 'listening' fires
   server.on("listening", () => {
-    try { server.__wasListened = true; } catch (e) { /* ignore */ }
+    try {
+      server.__wasListened = true;
+    } catch (e) {
+      /* ignore */
+    }
   });
 }
 
@@ -149,8 +175,12 @@ function closeHttpServer(srv) {
       // If server.listening is present and false, or we never observed listening, check alternative:
       // Use either the internal flag (set on 'listening') or server.address() which returns null if not bound.
       const wasListened = !!srv.__wasListened;
-      const hasAddress = typeof srv.address === "function" && srv.address() !== null;
-      const appearsRunning = (typeof srv.listening !== "undefined" ? !!srv.listening : wasListened || hasAddress);
+      const hasAddress =
+        typeof srv.address === "function" && srv.address() !== null;
+      const appearsRunning =
+        typeof srv.listening !== "undefined"
+          ? !!srv.listening
+          : wasListened || hasAddress;
 
       if (!appearsRunning) {
         // server not started or already closed — skip close
@@ -158,12 +188,20 @@ function closeHttpServer(srv) {
       }
 
       // Mark shutting down to prevent races
-      try { srv.__isShuttingDown = true; } catch (e) { /* ignore */ }
+      try {
+        srv.__isShuttingDown = true;
+      } catch (e) {
+        /* ignore */
+      }
 
       srv.close((err) => {
         if (err) {
           // Ignore 'server not running' style errors gracefully
-          if (err && (err.code === "ERR_SERVER_NOT_RUNNING" || err.code === "ERR_SERVER_ALREADY_CLOSED")) {
+          if (
+            err &&
+            (err.code === "ERR_SERVER_NOT_RUNNING" ||
+              err.code === "ERR_SERVER_ALREADY_CLOSED")
+          ) {
             return resolve();
           }
           return reject(err);
@@ -187,7 +225,11 @@ function start() {
   if (!server.listening && !server.__wasListened) {
     server.listen(PORT, () => {
       // server 'listening' event will set __wasListened; set again just to be safe
-      try { server.__wasListened = true; } catch (e) { /* ignore */ }
+      try {
+        server.__wasListened = true;
+      } catch (e) {
+        /* ignore */
+      }
       console.log(`Server listening on port ${PORT}`);
     });
   } else {
@@ -202,7 +244,9 @@ function start() {
     } catch (err) {
       // Log but DON'T exit — server remains up and will continue to serve non-DB features.
       console.error("MongoDB connection failed (background):", err);
-      console.warn("Continuing to run without DB. Socket.IO and HTTP remain active.");
+      console.warn(
+        "Continuing to run without DB. Socket.IO and HTTP remain active."
+      );
     }
   })();
 }
@@ -221,22 +265,38 @@ const gracefulFromSocket = createGracefulExit({
   // dynamic import used to avoid top-level imports if not needed elsewhere
   const os = await import("os");
   const processStartTime = Date.now();
-  console.log(`[proc] pid=${process.pid} argv=${process.argv.join(" ")} node=${process.version}`);
-  console.log(`[proc] platform=${os.platform()} arch=${os.arch()} cpus=${os.cpus().length}`);
+  console.log(
+    `[proc] pid=${process.pid} argv=${process.argv.join(" ")} node=${
+      process.version
+    }`
+  );
+  console.log(
+    `[proc] platform=${os.platform()} arch=${os.arch()} cpus=${
+      os.cpus().length
+    }`
+  );
 
   // catch server/io errors early
   if (server && typeof server.on === "function") {
     server.on("error", (err) => {
-      console.error("[server] error event:", err && err.stack ? err.stack : err);
+      console.error(
+        "[server] error event:",
+        err && err.stack ? err.stack : err
+      );
     });
   }
   if (typeof io !== "undefined" && io && typeof io.on === "function") {
     io.on("error", (err) => {
-      console.error("[socket.io] error event:", err && err.stack ? err.stack : err);
+      console.error(
+        "[socket.io] error event:",
+        err && err.stack ? err.stack : err
+      );
     });
     try {
       // adapter errors (optional)
-      io.of("/").adapter?.on?.("error", (e) => console.warn("[socket.adapter] error", e));
+      io
+        .of("/")
+        .adapter?.on?.("error", (e) => console.warn("[socket.adapter] error", e));
     } catch (e) {
       /* ignore if adapter not present */
     }
@@ -253,12 +313,17 @@ const gracefulFromSocket = createGracefulExit({
    */
   async function shutdownAndExit(code = 0, reason = "manual", extra = null) {
     // Immediate trace to identify caller (helpful to know who invoked shutdown)
-    console.error(`[shutdown] shutdownAndExit called — reason="${reason}" code=${code}`);
+    console.error(
+      `[shutdown] shutdownAndExit called — reason="${reason}" code=${code}`
+    );
     console.error("[shutdown] call stack (trace):");
     console.error(new Error("shutdown called at").stack);
 
     if (isShuttingDown) {
-      console.warn("[shutdown] already in progress — ignoring duplicate call", reason);
+      console.warn(
+        "[shutdown] already in progress — ignoring duplicate call",
+        reason
+      );
       return;
     }
     isShuttingDown = true;
@@ -267,26 +332,46 @@ const gracefulFromSocket = createGracefulExit({
       console.group && console.group("shutdown");
       console.log(`\n=== Shutdown initiated ===`);
       console.log(`pid=${process.pid} reason=${reason} code=${code}`);
-      console.log(`uptime_s=${(Date.now() - processStartTime) / 1000}`);
-      try { console.log("mem:", process.memoryUsage()); } catch (e) { /* ignore */ }
+      console.log(
+        `uptime_s=${(Date.now() - processStartTime) / 1000}`
+      );
+      try {
+        console.log("mem:", process.memoryUsage());
+      } catch (e) {
+        /* ignore */
+      }
       if (extra) {
-        console.log("shutdown extra info:", extra && extra.stack ? extra.stack : extra);
+        console.log(
+          "shutdown extra info:",
+          extra && extra.stack ? extra.stack : extra
+        );
       }
 
-      const GRACE_PERIOD_MS = parseInt(process.env.SHUTDOWN_GRACE_MS || "10000", 10) || 10000;
-      const FORCE_EXIT_ON_GRACE = process.env.FORCE_EXIT_ON_GRACE === "true";
+      const GRACE_PERIOD_MS =
+        parseInt(process.env.SHUTDOWN_GRACE_MS || "10000", 10) || 10000;
+      const FORCE_EXIT_ON_GRACE =
+        process.env.FORCE_EXIT_ON_GRACE === "true";
       const forceTimer = setTimeout(() => {
         console.error("Force exit: grace period expired.");
         // prefer non-zero code if we were shutting down due to error
         const exitCode = code === 0 ? 1 : code;
         // In production we exit; in dev only if explicitly forced
-        if (process.env.NODE_ENV === "production" || FORCE_EXIT_ON_GRACE) {
+        if (
+          process.env.NODE_ENV === "production" ||
+          FORCE_EXIT_ON_GRACE
+        ) {
           process.exit(exitCode);
         } else {
-          console.warn("[shutdown] grace expired but not exiting (dev mode).");
+          console.warn(
+            "[shutdown] grace expired but not exiting (dev mode)."
+          );
         }
       }, GRACE_PERIOD_MS);
-      try { forceTimer.unref(); } catch (e) { /* ignore */ }
+      try {
+        forceTimer.unref();
+      } catch (e) {
+        /* ignore */
+      }
 
       // 1) stop accepting new HTTP connections and wait for existing
       try {
@@ -297,7 +382,10 @@ const gracefulFromSocket = createGracefulExit({
           console.log("No HTTP server.close() available (skipping)");
         }
       } catch (httpErr) {
-        console.warn("Error while closing HTTP server:", httpErr && httpErr.stack ? httpErr.stack : httpErr);
+        console.warn(
+          "Error while closing HTTP server:",
+          httpErr && httpErr.stack ? httpErr.stack : httpErr
+        );
       }
 
       // 2) close Socket.IO via socket layer's graceful function (await it)
@@ -306,10 +394,15 @@ const gracefulFromSocket = createGracefulExit({
           await gracefulFromSocket();
           console.log("Socket layer closed via gracefulFromSocket().");
         } else {
-          console.log("No gracefulFromSocket function available (skipping socket close).");
+          console.log(
+            "No gracefulFromSocket function available (skipping socket close)."
+          );
         }
       } catch (ioErr) {
-        console.warn("Error while closing socket layer:", ioErr && ioErr.stack ? ioErr.stack : ioErr);
+        console.warn(
+          "Error while closing socket layer:",
+          ioErr && ioErr.stack ? ioErr.stack : ioErr
+        );
       }
 
       // 3) close DB connection last
@@ -321,32 +414,51 @@ const gracefulFromSocket = createGracefulExit({
           console.log("No closeDB function exported (skipping DB close).");
         }
       } catch (dbErr) {
-        console.warn("Error closing DB:", dbErr && dbErr.stack ? dbErr.stack : dbErr);
+        console.warn(
+          "Error closing DB:",
+          dbErr && dbErr.stack ? dbErr.stack : dbErr
+        );
       }
 
       clearTimeout(forceTimer);
       console.log("Shutdown complete.");
       console.groupEnd && console.groupEnd("shutdown");
     } catch (err) {
-      console.error("Fatal error during shutdown:", err && err.stack ? err.stack : err);
+      console.error(
+        "Fatal error during shutdown:",
+        err && err.stack ? err.stack : err
+      );
     } finally {
       // Only exit automatically in production, or when explicitly requested by env:
-      const FORCE_EXIT_ON_ERROR = process.env.FORCE_SHUTDOWN_ON_ERROR === "true";
-      if (process.env.NODE_ENV === "production" || FORCE_EXIT_ON_ERROR) {
-        console.log("Exiting process (production or FORCE_SHUTDOWN_ON_ERROR=true).");
-        try { process.exit(code === 0 ? 0 : code); } catch (e) { /* ignore */ }
+      const FORCE_SHUTDOWN_ON_ERROR =
+        process.env.FORCE_SHUTDOWN_ON_ERROR === "true";
+      if (process.env.NODE_ENV === "production" || FORCE_SHUTDOWN_ON_ERROR) {
+        console.log(
+          "Exiting process (production or FORCE_SHUTDOWN_ON_ERROR=true)."
+        );
+        try {
+          process.exit(code === 0 ? 0 : code);
+        } catch (e) {
+          /* ignore */
+        }
       } else {
         // In development, don't exit automatically — keeps nodemon / debugger stable.
-        console.log("[shutdown] not exiting process automatically (dev mode). Set FORCE_SHUTDOWN_ON_ERROR=true to force exit.");
+        console.log(
+          "[shutdown] not exiting process automatically (dev mode). Set FORCE_SHUTDOWN_ON_ERROR=true to force exit."
+        );
       }
     }
   }
 
   // -- DB watchdog --
-  // This periodically checks the DB health and keeps a counter of consecutive failures.
-  // It will only call shutdownAndExit if FORCE_SHUTDOWN_ON_DB=true or in production and threshold exceeded.
-  const DB_WATCH_INTERVAL_MS = parseInt(process.env.DB_WATCH_INTERVAL_MS || "5000", 10);
-  const DB_WATCH_THRESHOLD = parseInt(process.env.DB_WATCH_THRESHOLD || "6", 10); // e.g., 6 * 5s = 30s sustained
+  const DB_WATCH_INTERVAL_MS = parseInt(
+    process.env.DB_WATCH_INTERVAL_MS || "5000",
+    10
+  );
+  const DB_WATCH_THRESHOLD = parseInt(
+    process.env.DB_WATCH_THRESHOLD || "6",
+    10
+  ); // e.g., 6 * 5s = 30s sustained
   let dbConsecutiveDown = 0;
 
   const dbWatchHandle = setInterval(() => {
@@ -354,7 +466,9 @@ const gracefulFromSocket = createGracefulExit({
       if (isConnected && typeof isConnected === "function") {
         if (isConnected()) {
           if (dbConsecutiveDown > 0) {
-            console.log(`[db-watch] Mongo reconnected; clearing counter (was ${dbConsecutiveDown}).`);
+            console.log(
+              `[db-watch] Mongo reconnected; clearing counter (was ${dbConsecutiveDown}).`
+            );
           }
           dbConsecutiveDown = 0;
           return;
@@ -362,27 +476,39 @@ const gracefulFromSocket = createGracefulExit({
       }
       // if here, db is not connected
       dbConsecutiveDown += 1;
-      console.warn(`[db-watch] Mongo not connected (consecutive=${dbConsecutiveDown}).`);
+      console.warn(
+        `[db-watch] Mongo not connected (consecutive=${dbConsecutiveDown}).`
+      );
       // Only attempt automated shutdown if explicitly requested by env var OR running in production
-      const shouldForceShutdown = process.env.FORCE_SHUTDOWN_ON_DB === "true" || process.env.NODE_ENV === "production";
+      const shouldForceShutdown =
+        process.env.FORCE_SHUTDOWN_ON_DB === "true" ||
+        process.env.NODE_ENV === "production";
       if (dbConsecutiveDown >= DB_WATCH_THRESHOLD) {
-        console.error(`[db-watch] Mongo disconnected for ${dbConsecutiveDown} checks (threshold ${DB_WATCH_THRESHOLD}).`);
+        console.error(
+          `[db-watch] Mongo disconnected for ${dbConsecutiveDown} checks (threshold ${DB_WATCH_THRESHOLD}).`
+        );
         if (shouldForceShutdown) {
-          console.error("[db-watch] Initiating graceful shutdown due to sustained DB outage.");
+          console.error(
+            "[db-watch] Initiating graceful shutdown due to sustained DB outage."
+          );
           shutdownAndExit(1, "sustained_db_outage");
         } else {
-          console.warn("[db-watch] Sustained DB outage detected but FORCE_SHUTDOWN_ON_DB not set. Manual action required.");
+          console.warn(
+            "[db-watch] Sustained DB outage detected but FORCE_SHUTDOWN_ON_DB not set. Manual action required."
+          );
         }
       }
     } catch (err) {
-      console.error("[db-watch] error checking db state:", err && err.stack ? err.stack : err);
+      console.error(
+        "[db-watch] error checking db state:",
+        err && err.stack ? err.stack : err
+      );
     }
   }, DB_WATCH_INTERVAL_MS).unref();
 
   // signal handlers
   process.on("SIGINT", () => {
     console.log("Received SIGINT");
-    // For manual SIGINT we usually do want to exit even in dev
     shutdownAndExit(0, "SIGINT");
   });
   process.on("SIGTERM", () => {
@@ -392,25 +518,46 @@ const gracefulFromSocket = createGracefulExit({
 
   // handle unexpected errors: log everything first, then shutdown (behavior depends on env)
   process.on("uncaughtException", (err) => {
-    console.error("Uncaught exception (handling):", err && err.stack ? err.stack : err);
+    console.error(
+      "Uncaught exception (handling):",
+      err && err.stack ? err.stack : err
+    );
 
-    // In production: perform graceful shutdown and exit.
-    // In development: only log, do not call shutdownAndExit automatically.
-    if (process.env.NODE_ENV === "production" || process.env.FORCE_SHUTDOWN_ON_ERROR === "true") {
-      // small delay so logs flush then run shutdown
-      setTimeout(() => shutdownAndExit(1, "uncaughtException", err), 10);
+    if (
+      process.env.NODE_ENV === "production" ||
+      process.env.FORCE_SHUTDOWN_ON_ERROR === "true"
+    ) {
+      setTimeout(
+        () => shutdownAndExit(1, "uncaughtException", err),
+        10
+      );
     } else {
-      console.warn("[dev] uncaughtException - skipping process exit. Set FORCE_SHUTDOWN_ON_ERROR=true to force exit.");
+      console.warn(
+        "[dev] uncaughtException - skipping process exit. Set FORCE_SHUTDOWN_ON_ERROR=true to force exit."
+      );
     }
   });
 
   process.on("unhandledRejection", (reason, promise) => {
-    console.error("Unhandled rejection at promise:", promise, "reason:", reason && reason.stack ? reason.stack : reason);
+    console.error(
+      "Unhandled rejection at promise:",
+      promise,
+      "reason:",
+      reason && reason.stack ? reason.stack : reason
+    );
 
-    if (process.env.NODE_ENV === "production" || process.env.FORCE_SHUTDOWN_ON_ERROR === "true") {
-      setTimeout(() => shutdownAndExit(1, "unhandledRejection", reason), 10);
+    if (
+      process.env.NODE_ENV === "production" ||
+      process.env.FORCE_SHUTDOWN_ON_ERROR === "true"
+    ) {
+      setTimeout(
+        () => shutdownAndExit(1, "unhandledRejection", reason),
+        10
+      );
     } else {
-      console.warn("[dev] unhandledRejection - skipping process exit. Set FORCE_SHUTDOWN_ON_ERROR=true to force exit.");
+      console.warn(
+        "[dev] unhandledRejection - skipping process exit. Set FORCE_SHUTDOWN_ON_ERROR=true to force exit."
+      );
     }
   });
 
@@ -421,6 +568,10 @@ const gracefulFromSocket = createGracefulExit({
   process.on("exit", (code) => {
     console.log(`process exit event with code: ${code}`);
     // Clear db watch interval on exit (best-effort)
-    try { clearInterval(dbWatchHandle); } catch (e) { /* ignore */ }
+    try {
+      clearInterval(dbWatchHandle);
+    } catch (e) {
+      /* ignore */
+    }
   });
 })();
