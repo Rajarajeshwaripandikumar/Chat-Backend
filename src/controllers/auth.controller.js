@@ -28,13 +28,29 @@ function getTokenFromReq(req) {
   return null;
 }
 
-// 🔹 OPTIONAL: create reusable mail transporter (Gmail example)
+// 🔹 Create reusable mail transporter (Gmail example)
 const mailer = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: process.env.SMTP_EMAIL,
-    pass: process.env.SMTP_PASSWORD, // app password
+    pass: process.env.SMTP_PASSWORD, // Gmail app password
   },
+});
+
+// 🔹 Warn if SMTP env vars missing
+if (!process.env.SMTP_EMAIL || !process.env.SMTP_PASSWORD) {
+  console.warn(
+    "⚠️ SMTP_EMAIL or SMTP_PASSWORD is missing. Forgot-password email will fail."
+  );
+}
+
+// 🔹 Verify transporter once at startup (useful for debugging)
+mailer.verify((err, success) => {
+  if (err) {
+    console.error("❌ Error verifying SMTP transporter:", err);
+  } else {
+    console.log("✅ SMTP transporter is ready to send emails");
+  }
 });
 
 // =====================
@@ -191,7 +207,7 @@ export const checkAuth = async (req, res) => {
 };
 
 // =====================================================
-//  NEW: FORGOT PASSWORD  (POST /api/auth/forgot-password)
+//  FORGOT PASSWORD  (POST /api/auth/forgot-password)
 // =====================================================
 export const forgotPassword = async (req, res) => {
   try {
@@ -204,9 +220,10 @@ export const forgotPassword = async (req, res) => {
 
     // For security, don't reveal whether user exists
     if (!user) {
-      return res
-        .status(200)
-        .json({ ok: true, message: "If that email exists, a reset link was sent" });
+      return res.status(200).json({
+        ok: true,
+        message: "If that email exists, a reset link was sent",
+      });
     }
 
     // Generate random token
@@ -224,6 +241,9 @@ export const forgotPassword = async (req, res) => {
 
     // Build frontend URL
     const resetUrl = `${FRONTEND_URL}/reset-password/${resetToken}`;
+
+    // 🔹 Helpful in dev to see the link
+    console.log("🔗 Password reset link:", resetUrl);
 
     try {
       await mailer.sendMail({
@@ -249,21 +269,23 @@ export const forgotPassword = async (req, res) => {
         message: "If that email exists, a reset link was sent",
       });
     } catch (mailErr) {
-      console.error("Error sending reset email:", mailErr.message);
+      console.error("❌ Error sending reset email:", mailErr);
+
       // clean up token if email fails
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save();
+
       return res.status(500).json({ message: "Failed to send reset email" });
     }
   } catch (error) {
-    console.log("Error in forgotPassword:", error.message);
+    console.error("❌ Error in forgotPassword:", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
 // =====================================================
-//  NEW: RESET PASSWORD  (POST /api/auth/reset-password/:token)
+//  RESET PASSWORD  (POST /api/auth/reset-password/:token)
 // =====================================================
 export const resetPassword = async (req, res) => {
   try {
