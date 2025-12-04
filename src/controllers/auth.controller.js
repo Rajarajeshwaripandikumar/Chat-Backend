@@ -16,6 +16,9 @@ const JWT_SECRET = process.env.JWT_SECRET || "my-very-secure-secret-key";
 const COOKIE_NAME = process.env.JWT_COOKIE_NAME || "jwt";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
+// choose how to send email: "gmail" (local) or "log" (render)
+const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || "log";
+
 // Helper to extract token from cookie or Authorization header
 function getTokenFromReq(req) {
   // cookie-based
@@ -28,30 +31,63 @@ function getTokenFromReq(req) {
   return null;
 }
 
-// 🔹 Create reusable mail transporter (Gmail example)
-const mailer = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.SMTP_EMAIL,
-    pass: process.env.SMTP_PASSWORD, // Gmail app password
-  },
-});
+// =====================
+// EMAIL SENDER SETUP
+// =====================
 
-// 🔹 Warn if SMTP env vars missing
-if (!process.env.SMTP_EMAIL || !process.env.SMTP_PASSWORD) {
-  console.warn(
-    "⚠️ SMTP_EMAIL or SMTP_PASSWORD is missing. Forgot-password email will fail."
-  );
+let mailer = null;
+
+if (EMAIL_PROVIDER === "gmail") {
+  // Use Gmail SMTP (only on local machine; may timeout on Render)
+  mailer = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_PASS, // app password
+    },
+  });
+
+  mailer.verify((err, success) => {
+    if (err) {
+      console.error("❌ Error verifying SMTP transporter:", err);
+    } else {
+      console.log("✅ SMTP transporter is ready to send emails");
+    }
+  });
+} else {
+  console.log("📧 EMAIL_PROVIDER=log → emails will be logged, not sent");
 }
 
-// 🔹 Verify transporter once at startup (useful for debugging)
-mailer.verify((err, success) => {
-  if (err) {
-    console.error("❌ Error verifying SMTP transporter:", err);
-  } else {
-    console.log("✅ SMTP transporter is ready to send emails");
+// helper to send reset email (or just log)
+async function sendResetEmail(to, resetUrl) {
+  const from = process.env.MAIL_FROM || process.env.GMAIL_USER || "no-reply@example.com";
+
+  if (EMAIL_PROVIDER === "log" || !mailer) {
+    console.log("📧 [log only] Password reset email");
+    console.log("   To:", to);
+    console.log("   Link:", resetUrl);
+    return;
   }
-});
+
+  // EMAIL_PROVIDER === "gmail"
+  return mailer.sendMail({
+    to,
+    from,
+    subject: "Reset your Chintu password",
+    html: `
+      <p>You requested a password reset for your Chintu account.</p>
+      <p>Click the link below to reset your password (valid for 10 minutes):</p>
+      <p>
+        <a href="${resetUrl}" target="_blank" 
+           style="display:inline-block;padding:10px 16px;background:#4f46e5;color:#fff;
+                  text-decoration:none;border-radius:6px;font-weight:600;">
+          Reset Password
+        </a>
+      </p>
+      <p>If you did not request this, you can ignore this email.</p>
+    `,
+  });
+}
 
 // =====================
 // SIGNUP
@@ -242,27 +278,10 @@ export const forgotPassword = async (req, res) => {
     // Build frontend URL
     const resetUrl = `${FRONTEND_URL}/reset-password/${resetToken}`;
 
-    // 🔹 Helpful in dev to see the link
     console.log("🔗 Password reset link:", resetUrl);
 
     try {
-      await mailer.sendMail({
-        to: user.email,
-        from: process.env.SMTP_EMAIL,
-        subject: "Reset your Chintu password",
-        html: `
-          <p>You requested a password reset for your Chintu account.</p>
-          <p>Click the link below to reset your password (valid for 10 minutes):</p>
-          <p>
-            <a href="${resetUrl}" target="_blank" 
-               style="display:inline-block;padding:10px 16px;background:#4f46e5;color:#fff;
-                      text-decoration:none;border-radius:6px;font-weight:600;">
-              Reset Password
-            </a>
-          </p>
-          <p>If you did not request this, you can ignore this email.</p>
-        `,
-      });
+      await sendResetEmail(user.email, resetUrl);
 
       return res.status(200).json({
         ok: true,
