@@ -6,9 +6,9 @@ import cloudinary from "../lib/cloudinary.js";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 
-// 🔹 NEW: imports for reset-password
 import crypto from "crypto";
 import nodemailer from "nodemailer";
+import { Resend } from "resend"; // 🔹 Resend
 
 dotenv.config();
 
@@ -16,7 +16,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "my-very-secure-secret-key";
 const COOKIE_NAME = process.env.JWT_COOKIE_NAME || "jwt";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-// choose how to send email: "gmail" (local) or "log" (render)
+// choose how to send email: "gmail", "resend", or fallback "log"
 const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || "log";
 
 // Helper to extract token from cookie or Authorization header
@@ -35,10 +35,11 @@ function getTokenFromReq(req) {
 // EMAIL SENDER SETUP
 // =====================
 
-let mailer = null;
+let mailer = null;        // for Gmail
+let resendClient = null;  // for Resend
 
 if (EMAIL_PROVIDER === "gmail") {
-  // Use Gmail SMTP (only on local machine; may timeout on Render)
+  // Use Gmail SMTP (good for LOCAL dev only)
   mailer = nodemailer.createTransport({
     service: "gmail",
     auth: {
@@ -49,44 +50,83 @@ if (EMAIL_PROVIDER === "gmail") {
 
   mailer.verify((err, success) => {
     if (err) {
-      console.error("❌ Error verifying SMTP transporter:", err);
+      console.error("❌ Error verifying Gmail SMTP transporter:", err);
     } else {
-      console.log("✅ SMTP transporter is ready to send emails");
+      console.log("✅ Gmail SMTP transporter is ready to send emails");
     }
   });
+} else if (EMAIL_PROVIDER === "resend") {
+  if (!process.env.RESEND_API_KEY) {
+    console.error("❌ RESEND_API_KEY is missing. Emails will not be sent.");
+  } else {
+    resendClient = new Resend(process.env.RESEND_API_KEY);
+    console.log("✅ Resend client initialized");
+  }
 } else {
   console.log("📧 EMAIL_PROVIDER=log → emails will be logged, not sent");
 }
 
-// helper to send reset email (or just log)
+// helper to send reset email (gmail / resend / log)
 async function sendResetEmail(to, resetUrl) {
-  const from = process.env.MAIL_FROM || process.env.GMAIL_USER || "no-reply@example.com";
+  const from =
+    process.env.MAIL_FROM ||
+    process.env.GMAIL_USER ||
+    "no-reply@example.com";
 
-  if (EMAIL_PROVIDER === "log" || !mailer) {
-    console.log("📧 [log only] Password reset email");
-    console.log("   To:", to);
-    console.log("   Link:", resetUrl);
+  // --- RESEND ---
+  if (EMAIL_PROVIDER === "resend" && resendClient) {
+    const { error } = await resendClient.emails.send({
+      from,
+      to,
+      subject: "Reset your Chintu password",
+      html: `
+        <p>You requested a password reset for your Chintu account.</p>
+        <p>Click the link below to reset your password (valid for 10 minutes):</p>
+        <p>
+          <a href="${resetUrl}" target="_blank" 
+             style="display:inline-block;padding:10px 16px;background:#4f46e5;color:#fff;
+                    text-decoration:none;border-radius:6px;font-weight:600;">
+            Reset Password
+          </a>
+        </p>
+        <p>If you did not request this, you can ignore this email.</p>
+      `,
+    });
+
+    if (error) {
+      console.error("❌ Resend send error:", error);
+      throw new Error("Failed to send reset email");
+    }
+
     return;
   }
 
-  // EMAIL_PROVIDER === "gmail"
-  return mailer.sendMail({
-    to,
-    from,
-    subject: "Reset your Chintu password",
-    html: `
-      <p>You requested a password reset for your Chintu account.</p>
-      <p>Click the link below to reset your password (valid for 10 minutes):</p>
-      <p>
-        <a href="${resetUrl}" target="_blank" 
-           style="display:inline-block;padding:10px 16px;background:#4f46e5;color:#fff;
-                  text-decoration:none;border-radius:6px;font-weight:600;">
-          Reset Password
-        </a>
-      </p>
-      <p>If you did not request this, you can ignore this email.</p>
-    `,
-  });
+  // --- GMAIL ---
+  if (EMAIL_PROVIDER === "gmail" && mailer) {
+    await mailer.sendMail({
+      to,
+      from,
+      subject: "Reset your Chintu password",
+      html: `
+        <p>You requested a password reset for your Chintu account.</p>
+        <p>Click the link below to reset your password (valid for 10 minutes):</p>
+        <p>
+          <a href="${resetUrl}" target="_blank" 
+             style="display:inline-block;padding:10px 16px;background:#4f46e5;color:#fff;
+                    text-decoration:none;border-radius:6px;font-weight:600;">
+            Reset Password
+          </a>
+        </p>
+        <p>If you did not request this, you can ignore this email.</p>
+      `,
+    });
+    return;
+  }
+
+  // --- LOG ONLY (fallback) ---
+  console.log("📧 [log only] Password reset email");
+  console.log("   To:", to);
+  console.log("   Link:", resetUrl);
 }
 
 // =====================
@@ -115,7 +155,6 @@ export const signup = async (req, res) => {
     const newUser = new User({ fullName, email, password: hashedPassword });
     await newUser.save();
 
-    // Generate token, set cookie, and return token in JSON (dual support)
     const token = generateToken(newUser._id, res);
 
     res.status(201).json({
@@ -123,7 +162,7 @@ export const signup = async (req, res) => {
       fullName: newUser.fullName,
       email: newUser.email,
       profilePic: newUser.profilePic,
-      token, // include token so clients expecting JSON can store it
+      token,
     });
   } catch (error) {
     console.log("Error in signup controller:", error.message);
@@ -172,7 +211,6 @@ export const login = async (req, res) => {
 // =====================
 export const logout = (req, res) => {
   try {
-    // clear cookie with same name and options
     res.clearCookie(COOKIE_NAME, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -219,13 +257,13 @@ export const updateProfile = async (req, res) => {
 export const checkAuth = async (req, res) => {
   try {
     const token = getTokenFromReq(req);
-    if (!token) return res.status(200).json({ user: null }); // not authenticated
+    if (!token) return res.status(200).json({ user: null });
 
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
     } catch (err) {
-      return res.status(200).json({ user: null }); // invalid token => not authenticated
+      return res.status(200).json({ user: null });
     }
 
     const userId = decoded?.userId || decoded?.id || decoded?.sub;
@@ -234,7 +272,6 @@ export const checkAuth = async (req, res) => {
     const user = await User.findById(userId).select("-password");
     if (!user) return res.status(200).json({ user: null });
 
-    // return user object
     res.status(200).json({ user });
   } catch (error) {
     console.log("Error in checkAuth controller:", error.message);
@@ -290,7 +327,6 @@ export const forgotPassword = async (req, res) => {
     } catch (mailErr) {
       console.error("❌ Error sending reset email:", mailErr);
 
-      // clean up token if email fails
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save();
